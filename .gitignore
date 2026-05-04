@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Environment
+.env
+
+# Generated outputs
+screenshots/
+figma_frames/
+diffs/
+reports/
+extensions/
+
+# Scratch / temp files
+_*.py
+_*.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

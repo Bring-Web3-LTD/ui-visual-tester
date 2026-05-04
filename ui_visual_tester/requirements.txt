@@ -1,0 +1,8 @@
+patchright==1.59.1
+playwright==1.52.0
+google-genai>=1.74.0
+requests==2.32.3
+python-dotenv==1.1.0
+Pillow>=10.0.0
+pixelmatch>=0.3.0
+boto3>=1.34.0
