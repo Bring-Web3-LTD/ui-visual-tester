@@ -12,6 +12,7 @@ FIGMA_FILES = {
     "topbar": os.getenv("FIGMA_FILE_KEY_TOPBAR", ""),
 }
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # ── Paths ─────────────────────────────────────────────────
 PROJECT_DIR      = Path(__file__).parent
@@ -53,3 +54,4 @@ WAIT_TOPBAR_RENDER   = 3000
 
 # ── AI Vision model ───────────────────────────────────────
 GEMINI_MODEL = "gemini-2.5-flash"
+CLAUDE_MODEL = "claude-sonnet-4-20250514"

@@ -3,7 +3,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import argparse
 import importlib
-import random
 import shutil
 import time
 from pathlib import Path
@@ -22,7 +21,7 @@ from core.figma import (
     download_figma_frames, parse_figma_frames,
     extract_all_figma_elements, deduplicate_figma_elements,
 )
-from core.compare import pixel_diff, gemini_compare, gemini_compare_style
+from core.compare import pixel_diff, claude_compare, claude_compare_style
 from core.report import generate_report
 from core.deployer import build_extension, download_latest_extension
 
@@ -168,23 +167,7 @@ def capture_styles(product: str, style_frames: list, prod_cfg,
         # Terminal state last
         sorted_states = sorted(states.items(), key=lambda s: s[0] == terminal_state)
 
-        # ── Phase 1: ONE search to get the Google results URL ──
-        search_url = None
-        with sync_playwright() as p:
-            ctx, page = launch_stealth_context(p, this_ext)
-            page.set_viewport_size({"width": 1920, "height": browser_h})
-            try:
-                search_and_wait_for_ui(page, search_query, sel, ready_sels)
-                search_url = page.url
-                print(f"  Search URL saved: {search_url[:80]}...")
-            except Exception as e:
-                print(f"  SKIP '{frame_name}': initial search failed ({e})")
-            ctx.close()
-
-        if not search_url:
-            continue
-
-        # ── Phase 2: for each state, open a fresh context → goto(url) ──
+        # ── For each state: fresh context → real search → capture ──
         with sync_playwright() as p:
             for state_idx, (state_name, actions) in enumerate(sorted_states):
                 print(f"\n  >> State: {state_name}")
@@ -194,15 +177,11 @@ def capture_styles(product: str, style_frames: list, prod_cfg,
                 ctx, page = launch_stealth_context(p, this_ext)
                 page.set_viewport_size({"width": 1920, "height": browser_h})
 
-                # Navigate directly to the saved search URL — no new search
+                # Real search each time (goto doesn't trigger the extension)
                 try:
-                    page.goto(search_url, wait_until="domcontentloaded")
-                    time.sleep(random.uniform(2.0, 3.5))
-
-                    page.wait_for_selector(sel["container"], timeout=TOPBAR_TIMEOUT)
-                    time.sleep(WAIT_TOPBAR_RENDER / 1000)
+                    search_and_wait_for_ui(page, search_query, sel, ready_sels)
                 except Exception as e:
-                    print(f"    SKIP state '{state_name}': topbar not visible ({e})")
+                    print(f"    SKIP state '{state_name}': search/topbar failed ({e})")
                     ctx.close()
                     continue
 
@@ -326,7 +305,7 @@ if __name__ == "__main__":
         )
 
     # Step 3: Compare
-    print("\n=== Step 3: Compare with Gemini ===")
+    print("\n=== Step 3: Compare with Claude ===")
     results = []
 
     # 3a: Responsive
@@ -339,7 +318,7 @@ if __name__ == "__main__":
 
         print(f"\n--- Pixel diff: {name} ---")
         diff_stats = pixel_diff(screenshot_path, figma_path)
-        ai_result = gemini_compare(screenshot_path, figma_path, diff_stats=diff_stats)
+        ai_result = claude_compare(screenshot_path, figma_path, diff_stats=diff_stats)
 
         results.append({
             "name": name,
@@ -376,7 +355,7 @@ if __name__ == "__main__":
                 print(f"    {state_name}: {len(dom_elements)} DOM elements")
 
             print(f"\n--- Style check: {frame_name} ({len(state_screenshots)} states) ---")
-            ai_result = gemini_compare_style(
+            ai_result = claude_compare_style(
                 figma_elements, all_dom_elements,
                 state_screenshots, spec_path,
             )
