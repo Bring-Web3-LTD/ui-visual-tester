@@ -17,20 +17,6 @@ Automated visual QA tool that compares live browser UI against Figma designs usi
 | **Responsive** | Captures the UI at multiple viewport widths and compares layout against Figma |
 | **Style** | Extracts DOM computed styles and compares colors, typography, borders, spacing etc. against Figma design tokens |
 
-## Project Structure
-
-```
-products/           # Product-specific configs (selectors, states, platforms)
-ui_visual_tester/
-  main.py           # CLI entry point & orchestration
-  config.py         # Environment variables & paths
-  core/
-    browser.py      # Browser launch, navigation & DOM extraction
-    compare.py      # Pixel diff + Gemini AI comparison
-    figma.py        # Figma API integration & element parsing
-    deployer.py     # AWS ECS deployment & S3 extension download
-    report.py       # JSON report generation
-```
 
 ## Setup
 
@@ -64,10 +50,3 @@ python main.py --product topbar --extension-path ./path/to/extension
 python main.py --product topbar --no-build
 ```
 
-## Requirements
-
-- Python 3.10+
-- Chrome (managed by Patchright)
-- Figma API token
-- Google Gemini API key
-- AWS credentials (for ECS builds & S3 downloads)

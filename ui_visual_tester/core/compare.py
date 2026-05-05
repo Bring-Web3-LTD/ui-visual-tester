@@ -1,11 +1,11 @@
 import json
 import re
 import time
-from google import genai
-from google.genai import types
+import base64
+import anthropic
 from PIL import Image
 from pixelmatch import pixelmatch
-from config import GEMINI_API_KEY, GEMINI_MODEL, DIFFS_DIR
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, DIFFS_DIR
 
 
 # ── Pixel-level diff ─────────────────────────────────────
@@ -42,147 +42,180 @@ def pixel_diff(screenshot_path, figma_path) -> dict:
         "size": (w, h),
     }
 
-# ── Gemini: intelligent style comparison ─────────────────
-def gemini_compare_style(figma_elements, dom_elements, screenshots,spec_path=None, state_name="unknown") -> dict:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    parts = []
+# ── Claude: single-state style comparison (internal) ─────
+def _img_to_base64(path) -> str:
+    return base64.standard_b64encode(path.read_bytes()).decode("utf-8")
+
+def _compare_single_state(client, figma_elements, state_name, dom_styles,
+                          screenshot_path, spec_path) -> dict:
+    content = []
 
     figma_text = json.dumps(figma_elements, indent=2, ensure_ascii=False)
-    dom_text = json.dumps(dom_elements, indent=2, ensure_ascii=False)
+    dom_text = json.dumps({state_name: dom_styles}, indent=2, ensure_ascii=False)
 
     if spec_path and spec_path.exists():
-        parts.append("FIGMA SPEC SHEET (shows all UI states/variants):")
-        parts.append(types.Part.from_bytes(data=spec_path.read_bytes(), mime_type="image/png"))
+        content.append({"type": "text", "text": "FIGMA SPEC SHEET (shows all UI states/variants):"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                        "data": _img_to_base64(spec_path)}})
 
-    for shot_path in screenshots:
-        parts.append(f"Live screenshot — {shot_path.stem}:")
-        parts.append(types.Part.from_bytes(data=shot_path.read_bytes(), mime_type="image/png"))
+    content.append({"type": "text", "text": f"Live screenshot — {screenshot_path.stem}:"})
+    content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                    "data": _img_to_base64(screenshot_path)}})
 
-    prompt = f"""You are a design QA expert. Compare live browser DOM data + screenshots against a Figma design spec.
+    prompt = f"""Design QA: compare the "{state_name}" state of a browser extension topbar.
+You receive a Figma spec image (all states/variants), a live screenshot, Figma JSON data, and DOM CSS data.
+Match each Figma element to its DOM counterpart by name/keyword (e.g. "cashback" in Figma → element containing "cashback" in DOM).
 
-## FIGMA DESIGN DATA (from Figma REST API — all visual properties from the active design):
+FIGMA DATA:
 ```json
 {figma_text}
 ```
 
-## LIVE DOM DATA (from getComputedStyle — all non-trivial computed styles, organized by state):
-Each DOM element has an `id`, `tag`, `text`, `width`, `height`, and a `styles` dict containing
-every CSS property that has a non-empty value. Property names are in CSS kebab-case (e.g. "font-size").
+DOM DATA:
 ```json
 {dom_text}
 ```
 
-## INSTRUCTIONS:
-Match each DOM/screenshot state to its Figma counterpart by keyword (e.g. "hover" → hover variant).
-Compare ALL visual properties: colors, typography, border-radius, padding, opacity, borders, shadows.
-Map Figma properties to CSS: fills→background-color, style.fontFamily→font-family, cornerRadius→border-radius, strokeWeight→border-width, effects→box-shadow.
+Automatically map each Figma property to its equivalent DOM CSS property (e.g. fills→background-color, cornerRadius→border-radius, etc.). Compare only properties present in BOTH datasets.
 
-## TRUTH HIERARCHY (highest to lowest):
-1. Figma SPEC IMAGE — visual source of truth for design intent
-2. Live SCREENSHOT — what the user actually sees
-3. DOM CSS values — precise but may miss visual context
-4. Figma JSON — may contain stale/mixed data from dedup; IGNORE if it contradicts the spec image
+COMPARISON RULES:
+1. TRUTH PRIORITY: Spec image > Live screenshot > DOM CSS values > Figma JSON values.
+   When sources conflict, trust the higher-priority source.
+2. Only compare properties that exist in BOTH Figma and DOM data. Never invent or guess values.
+   If DOM data is empty/missing for a property, SKIP that check — do not FAIL it.
+3. COLOR TOLERANCE: colors within ΔE ≤ 5 (roughly ±10 RGB per channel) → PASS.
+   Hover/active states may have slight opacity changes → PASS.
+4. SIZE TOLERANCE: width/height within ±10% or ±5px (whichever is larger) → PASS.
+   Width diff > 50% → FAIL. Between 10%-50% → FAIL only if clearly visible in screenshot.
+5. FONT: same visual family → PASS (e.g. "Inter" vs "Inter, sans-serif" → PASS).
+   Same size ±1px → PASS.
+6. CROSS-STATE RULE: An element visible in ANY provided screenshot is NOT missing.
+   Only FAIL "missing element" if it appears in Figma but is absent from ALL screenshots.
+7. HOVER STATES: Slight color lightening/darkening on hover elements → PASS.
+   Completely different hue on hover → FAIL.
+8. IGNORE: dynamic text content differences, Figma annotations/comments, layer ordering.
 
-## PASS rules (mark PASS, not FAIL):
-- Visually similar colors (e.g. #1A1A1A vs #000000 — both look black)
-- Slight hover opacity changes (standard interactive feedback)
-- Dynamic text content differences (names, prices, widths)
-- Font-family mismatch in JSON if fonts look identical in images
-- Anti-aliasing / sub-pixel rendering differences
+OUTPUT — valid JSON only, no markdown wrapping:
+{{"checks": [{{"element": "name", "property": "prop", "figma": "val", "dom": "val", "status": "PASS|FAIL", "note": "brief reason", "state": "{state_name}"}}], "visual_issues": ["description of any visual problem not covered by checks"], "summary": {{"total": N, "passed": N, "failed": N, "verdict": "PASS|FAIL"}}}}"""
 
-## FAIL only when:
-- Color difference is CLEARLY VISIBLE (different hue or obviously lighter/darker)
-- Fundamentally wrong style (wrong element, wrong layout, missing component)
-- Width difference >50% suggesting layout break
-
-## CROSS-STATE rule:
-- You are given MULTIPLE state screenshots. If an element (e.g. close button X) is visible in ANY screenshot, it is NOT missing — mark PASS.
-- Only mark "presence: FAIL" if the element is absent from ALL screenshots.
-
-## IGNORE: dynamic text content, Figma doc labels/annotations
-
-## OUTPUT — valid JSON, no markdown:
-{{"checks": [{{"element": "name", "property": "prop", "figma": "value", "dom": "value", "status": "PASS", "state": "state name"}}], "visual_issues": ["description"], "summary": {{"total": N, "passed": N, "failed": N, "verdict": "PASS|FAIL"}}}}
-"verdict": "PASS" if 0 failures, else "FAIL". Show exact values from both sides."""
-
-    parts.append(prompt)
+    content.append({"type": "text", "text": prompt})
 
     for attempt in range(5):
         try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=parts,
-                config=types.GenerateContentConfig(
-                    max_output_tokens=65536,
-                    response_mime_type="application/json",
-                ),
+            response = client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=4096,
+                messages=[{"role": "user", "content": content}],
             )
             break
         except Exception as e:
             err = str(e).lower()
-            if "429" in str(e) or "rate" in err or "503" in str(e) or "unavailable" in err:
-                wait = 60 * (attempt + 1)
-                print(f"  API issue ({str(e)[:80]}...), waiting {wait}s...")
+            if "429" in str(e) or "rate" in err or "503" in str(e) or "overloaded" in err:
+                wait = 30 * (attempt + 1)
+                print(f"    API issue ({str(e)[:80]}...), waiting {wait}s...")
                 time.sleep(wait)
             else:
                 raise
     else:
-        raise RuntimeError("Gemini API rate limit exceeded after 5 retries")
+        raise RuntimeError(f"Claude API failed after 5 retries (state: {state_name})")
 
-    # Check for truncation
-    try:
-        finish = response.candidates[0].finish_reason
-        if finish and str(finish) not in ("STOP", "FinishReason.STOP", "1"):
-            print(f"  WARNING: Gemini response may be truncated (finish_reason={finish})")
-    except (IndexError, AttributeError):
-        pass
-
-    raw_text = response.text.strip()
-
+    raw_text = response.content[0].text.strip()
     try:
         cleaned = raw_text
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-        result = json.loads(cleaned)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
         json_match = re.search(r'\{[\s\S]*\}', raw_text)
         if json_match:
             try:
-                result = json.loads(json_match.group())
+                return json.loads(json_match.group())
             except json.JSONDecodeError:
-                result = {"checks": [], "visual_issues": [raw_text],
-                          "summary": {"total": 0, "passed": 0, "failed": 0, "verdict": "FAIL"},
-                          "raw_response": raw_text}
+                pass
+        return {"checks": [], "visual_issues": [raw_text],
+                "summary": {"total": 0, "passed": 0, "failed": 0, "verdict": "FAIL"}}
+
+
+# ── Claude: style comparison (splits per state) ─────────
+RATE_LIMIT_DELAY = 4  # seconds between API calls
+
+def claude_compare_style(figma_elements, dom_elements, screenshots,
+                         spec_path=None, state_name="unknown") -> dict:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    # Build state→screenshot mapping
+    state_shots = []
+    for shot_path in screenshots:
+        # Extract state from filename: style_topbar_Ecko_cashback_offer.png → cashback offer
+        stem = shot_path.stem
+        for state in dom_elements:
+            safe = state.replace(" ", "_")
+            if stem.endswith(safe):
+                state_shots.append((state, shot_path, dom_elements[state]))
+                break
         else:
-            result = {"checks": [], "visual_issues": [raw_text],
-                      "summary": {"total": 0, "passed": 0, "failed": 0, "verdict": "FAIL"},
-                      "raw_response": raw_text}
+            # Fallback: derive state from filename
+            parts_list = stem.split("_")
+            state_guess = " ".join(parts_list[3:]) if len(parts_list) > 3 else stem
+            state_shots.append((state_guess, shot_path, dom_elements.get(state_guess, {})))
 
-    summary = result.get("summary", {})
-    checks = result.get("checks", [])
-    failed_checks = [c for c in checks if c.get("status") == "FAIL"]
+    all_checks = []
+    all_issues = []
+    total_pass = 0
+    total_fail = 0
 
-    print(f"\n=== Style: {[s.stem for s in screenshots][:2]}... ({len(screenshots)} states) ===")
-    print(f"  Total: {summary.get('total', len(checks))} | "
-          f"Pass: {summary.get('passed', len(checks) - len(failed_checks))} | "
-          f"Fail: {summary.get('failed', len(failed_checks))} | "
-          f"{summary.get('verdict', 'UNKNOWN')}")
-    if failed_checks:
-        for c in failed_checks[:8]:
-            print(f"    x {c.get('element')} > {c.get('property')}: "
-                  f"expected {c.get('figma')}, got {c.get('dom')}")
-        if len(failed_checks) > 8:
-            print(f"    ... and {len(failed_checks) - 8} more failures")
+    for i, (st_name, shot_path, dom_styles) in enumerate(state_shots):
+        print(f"\n    Comparing state '{st_name}' ({i+1}/{len(state_shots)})...")
 
-    return result
+        result = _compare_single_state(
+            client, figma_elements, st_name, dom_styles, shot_path, spec_path
+        )
 
-# ── Gemini: responsive visual comparison ─────────────────
-def gemini_compare(screenshot_path, figma_path, diff_stats=None) -> str:
-    client = genai.Client(api_key=GEMINI_API_KEY)
+        checks = result.get("checks", [])
+        issues = result.get("visual_issues", [])
 
-    parts = [
-        types.Part.from_bytes(data=screenshot_path.read_bytes(), mime_type="image/png"),
-        types.Part.from_bytes(data=figma_path.read_bytes(), mime_type="image/png"),
+        passed = sum(1 for c in checks if c.get("status") == "PASS")
+        failed = sum(1 for c in checks if c.get("status") == "FAIL")
+
+        print(f"      {st_name}: {len(checks)} checks, {passed} pass, {failed} fail")
+        for c in checks:
+            if c.get("status") == "FAIL":
+                print(f"        x {c.get('element')} > {c.get('property')}: "
+                      f"expected {c.get('figma')}, got {c.get('dom')}")
+
+        all_checks.extend(checks)
+        all_issues.extend(issues)
+        total_pass += passed
+        total_fail += failed
+
+        # Rate limit delay between calls (skip after last)
+        if i < len(state_shots) - 1:
+            print(f"    Waiting {RATE_LIMIT_DELAY}s (rate limit)...")
+            time.sleep(RATE_LIMIT_DELAY)
+
+    # Merged result
+    verdict = "PASS" if total_fail == 0 else "FAIL"
+    total = total_pass + total_fail
+    merged = {
+        "checks": all_checks,
+        "visual_issues": all_issues,
+        "summary": {"total": total, "passed": total_pass, "failed": total_fail, "verdict": verdict},
+    }
+
+    print(f"\n=== Style summary ({len(state_shots)} states) ===")
+    print(f"  Total: {total} | Pass: {total_pass} | Fail: {total_fail} | {verdict}")
+
+    return merged
+
+# ── Claude: responsive visual comparison ─────────────────
+def claude_compare(screenshot_path, figma_path, diff_stats=None) -> str:
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    content = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+         "data": _img_to_base64(screenshot_path)}},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+         "data": _img_to_base64(figma_path)}},
     ]
 
     diff_info = ""
@@ -190,69 +223,66 @@ def gemini_compare(screenshot_path, figma_path, diff_stats=None) -> str:
         diff_info = f"""\n\nPixel diff results: {diff_stats['mismatch']:,} pixels differ out of {diff_stats['total']:,} ({diff_stats['pct']}%).
     Images were compared at {diff_stats['size'][0]}x{diff_stats['size'][1]}."""
 
-    prompt = f"""You are a visual QA reviewer.
-
-Compare these two images:
-- Image 1: Screenshot of a live UI element from the browser
-- Image 2: Figma design of the same UI element
+    prompt = f"""Visual QA: Compare a browser extension topbar across two images.
+Image 1 = live browser screenshot. Image 2 = Figma design reference.
 {diff_info}
 
-IMPORTANT — IGNORE these differences (they are NOT bugs):
-- Different text content (dynamic data like names, prices, percentages)
-- Different logos or brand icons — these change per context
-- RTL vs LTR text direction — this is locale, not a bug
-- Minor anti-aliasing or font rendering differences
-- Pixel diff heatmap showing red on text/logo areas — dynamic content
+COMPARISON CATEGORIES (check each):
+1. LAYOUT & POSITIONS — Are elements in the same relative positions? Same left-to-right order?
+2. SIZES — Are containers, buttons, icons roughly the same size? (tolerance: ±10% or ±5px)
+3. SPACING — Are gaps between elements consistent? Padding inside containers similar?
+4. ALIGNMENT — Are elements vertically/horizontally centered the same way?
+5. COLORS — Are background colors, text colors, border colors matching? (tolerance: ΔE ≤ 5)
+6. TYPOGRAPHY — Similar font sizes and weights? (tolerance: ±1px size, visual weight match)
+7. STRUCTURE — Same number of visible sections/groups? Any missing or extra components?
+8. CONTAINER HEIGHT — Is the overall topbar height similar?
 
-ONLY flag as FAIL if there is a STRUCTURAL or DESIGN difference:
-- Wrong background color, button color, or border color
-- Wrong element sizes (buttons/icons disproportionate to design)
-- Wrong spacing/padding between structural elements
-- Missing or extra UI elements
-- Layout structure broken (sections in wrong order or size)
+IGNORE (always PASS these):
+- Different text content, logos, or icons (these are dynamic/per-retailer)
+- RTL vs LTR text direction
+- Anti-aliasing differences and sub-pixel rendering
+- Pixel-diff red highlighting on text areas (text is dynamic)
+- Minor opacity differences on hover states
 
-Check:
-1. Element positions — correct layout structure?
-2. Element sizes — proportional to design?
-3. Spacing — correct margins/padding?
-4. Alignment — vertically/horizontally correct?
-5. Overall structure — layout matches design?
-6. Font sizes — approximately match?
-7. Container height — approximately matches?
+FAIL ONLY WHEN:
+- Clearly different hue/color (not just brightness)
+- Element size off by more than 50%
+- Element completely missing or extra element added
+- Layout is structurally broken (overlapping, overflow, wrong axis)
+- Spacing off by more than 15px
 
-Format:
-1. Positions: PASS/FAIL — [specific observation]
-2. Sizes: PASS/FAIL — [specific observation]
-...
+FORMAT each category as:
+"N. Category: PASS/FAIL — [brief observation]"
 
 End with exactly: OVERALL: PASS or OVERALL: FAIL"""
 
     if diff_stats and diff_stats.get("diff_path"):
-        parts.append(types.Part.from_bytes(data=diff_stats["diff_path"].read_bytes(), mime_type="image/png"))
-        parts.append("Image 3 above is the pixel-diff heatmap (red = different pixels).\n\n" + prompt)
+        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                        "data": _img_to_base64(diff_stats["diff_path"])}})
+        content.append({"type": "text", "text": "Image 3 above is the pixel-diff heatmap (red = different pixels).\n\n" + prompt})
     else:
-        parts.append(prompt)
+        content.append({"type": "text", "text": prompt})
 
     for attempt in range(5):
         try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=parts,
-                config=types.GenerateContentConfig(max_output_tokens=2000),
+            response = client.messages.create(
+                model=CLAUDE_MODEL,
+                max_tokens=2000,
+                messages=[{"role": "user", "content": content}],
             )
             break
         except Exception as e:
             err = str(e).lower()
-            if "429" in str(e) or "rate" in err or "503" in str(e) or "unavailable" in err:
-                wait = 60 * (attempt + 1)
+            if "429" in str(e) or "rate" in err or "503" in str(e) or "overloaded" in err:
+                wait = 30 * (attempt + 1)
                 print(f"  API issue ({str(e)[:80]}...), waiting {wait}s...")
                 time.sleep(wait)
             else:
                 raise
     else:
-        raise RuntimeError("Gemini API rate limit exceeded after 5 retries")
+        raise RuntimeError("Claude API failed after 5 retries")
 
-    result = response.text
-    print(f"\n=== Gemini: {screenshot_path.name} vs {figma_path.name} ===")
+    result = response.content[0].text
+    print(f"\n=== Claude: {screenshot_path.name} vs {figma_path.name} ===")
     print(result)
     return result
