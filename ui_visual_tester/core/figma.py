@@ -245,10 +245,17 @@ def download_figma_frames(product: str, skip_images: bool = False, out_dir: Path
     if not frames:
         return [], {}
 
-    # If images are cached, return existing files + nodes (skip download)
+    # If images are cached, return only files for the current frames + nodes
     if skip_images:
         target_dir.mkdir(parents=True, exist_ok=True)
-        saved = list(target_dir.glob("*.png"))
+        expected_files = {target_dir / f"{frame_name}.png" for frame_name in frames.values()}
+        saved = [file_path for file_path in expected_files if file_path.exists()]
+        stale = [file_path for file_path in target_dir.glob("*.png") if file_path not in expected_files]
+        if stale:
+            print(
+                "  Ignoring stale cached PNGs not present in current Figma frames: "
+                + ", ".join(sorted(file_path.name for file_path in stale))
+            )
         print(f"  Using {len(saved)} cached PNGs (skipped image download)")
         return saved, frame_nodes
 
