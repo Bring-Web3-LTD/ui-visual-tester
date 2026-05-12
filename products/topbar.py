@@ -1,4 +1,4 @@
-from products import PLATFORMS 
+PLATFORMS = ["ecko"]
 
 # ── Default platform for responsive tests ─────────────────
 DEFAULT_PLATFORM = "ecko"
