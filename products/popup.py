@@ -1,7 +1,6 @@
-from products import PLATFORMS 
-
 # ── Default platform for responsive tests ─────────────────
 DEFAULT_PLATFORM = "ecko"
+PLATFORMS = [DEFAULT_PLATFORM]
 
 # ── Browser window height (width comes from Figma frame names) ──
 DEFAULT_BROWSER_HEIGHT = 900
