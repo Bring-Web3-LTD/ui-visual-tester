@@ -132,16 +132,16 @@ def download_extension(env_name: str, platform_name: str) -> Path:
     raise FileNotFoundError(f"No manifest.json found in {extract_dir}")
 
 # ── S3: Download latest extension (any env) ──────────────
-def download_latest_extension(product: str, platform_name: str) -> Path:
-    """Find the most recently uploaded extension zip in S3 for this product/platform."""
+def download_latest_extension(platform_name: str) -> Path:
+    """Find the most recently uploaded extension zip in S3 for this platform."""
     s3 = boto3.client("s3", region_name=AWS_REGION)
     prefix = f"extensions/"
 
     resp = s3.list_objects_v2(Bucket=S3_EXTENSIONS_BUCKET, Prefix=prefix)
     contents = resp.get("Contents", [])
 
-    # Filter zips matching our product+platform pattern
-    pattern = f"ui-test-{product}-{platform_name}"
+    # Filter zips matching our platform pattern
+    pattern = f"ui-test-{platform_name}"
     zips = [obj for obj in contents
             if obj["Key"].endswith(".zip") and pattern in obj["Key"]]
 
@@ -158,12 +158,12 @@ def download_latest_extension(product: str, platform_name: str) -> Path:
 
     # Download
     EXTENSIONS_DIR.mkdir(exist_ok=True)
-    zip_path = EXTENSIONS_DIR / f"{product}_{platform_name}_latest.zip"
+    zip_path = EXTENSIONS_DIR / f"{platform_name}_latest.zip"
     s3.download_file(S3_EXTENSIONS_BUCKET, zip_key, str(zip_path))
     print(f"  Downloaded: {zip_path.name}")
 
     # Extract
-    extract_dir = EXTENSIONS_DIR / f"{product}_{platform_name}_latest"
+    extract_dir = EXTENSIONS_DIR / f"{platform_name}_latest"
     if extract_dir.exists():
         shutil.rmtree(extract_dir)
     extract_dir.mkdir()

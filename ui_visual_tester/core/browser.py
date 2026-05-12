@@ -39,47 +39,69 @@ def dismiss_consent(page):
     except Exception:
         pass
 
+def _is_url(query: str) -> bool:
+    """Check if the search query looks like a direct URL."""
+    return "." in query and " " not in query
+
 def search_and_wait_for_ui(page, search_query: str, sel: dict,
                            ready_selectors: list = None, retries: int = 3):
     for attempt in range(retries):
         print(f"  Search attempt {attempt + 1}/{retries}...")
 
-        page.goto("https://www.google.com", wait_until="domcontentloaded")
-        time.sleep(random.uniform(2.5, 4.5))
-        dismiss_consent(page)
+        if _is_url(search_query):
+            # Direct navigation — go to the site
+            url = search_query if search_query.startswith("http") else f"https://{search_query}"
+            print(f"  Navigating directly to {url}")
+            page.goto(url, wait_until="domcontentloaded")
+            time.sleep(WAIT_AFTER_SEARCH / 1000)
+        else:
+            # Google search
+            page.goto("https://www.google.com", wait_until="domcontentloaded")
+            time.sleep(random.uniform(2.5, 4.5))
+            dismiss_consent(page)
 
-        try:
-            page.mouse.move(random.randint(300, 600), random.randint(200, 400))
-            time.sleep(random.uniform(0.3, 0.8))
-        except Exception:
-            pass
+            try:
+                page.mouse.move(random.randint(300, 600), random.randint(200, 400))
+                time.sleep(random.uniform(0.3, 0.8))
+            except Exception:
+                pass
 
-        search_box = page.locator('textarea[name="q"], input[name="q"]:visible').first
-        search_box.click()
-        time.sleep(random.uniform(0.4, 0.9))
+            search_box = page.locator('textarea[name="q"], input[name="q"]:visible').first
+            search_box.click()
+            time.sleep(random.uniform(0.4, 0.9))
 
-        for char in search_query:
-            search_box.type(char, delay=0)
-            time.sleep(random.uniform(0.05, 0.25))
+            for char in search_query:
+                search_box.type(char, delay=0)
+                time.sleep(random.uniform(0.05, 0.25))
 
-        time.sleep(random.uniform(0.8, 1.5))
-        page.keyboard.press("Enter")
-        time.sleep(WAIT_AFTER_SEARCH / 1000)
+            time.sleep(random.uniform(0.8, 1.5))
+            page.keyboard.press("Enter")
+            time.sleep(WAIT_AFTER_SEARCH / 1000)
 
-        # Check for CAPTCHA
-        if "/sorry/" in page.url or "recaptcha" in page.content().lower():
-            wait_time = 30 * (attempt + 1)
-            print(f"  Google CAPTCHA detected, waiting {wait_time}s...")
-            time.sleep(wait_time)
-            if attempt < retries - 1:
-                continue
-            else:
-                raise RuntimeError("Google CAPTCHA on all retries")
+            # Check for CAPTCHA
+            if "/sorry/" in page.url or "recaptcha" in page.content().lower():
+                wait_time = 30 * (attempt + 1)
+                print(f"  Google CAPTCHA detected, waiting {wait_time}s...")
+                time.sleep(wait_time)
+                if attempt < retries - 1:
+                    continue
+                else:
+                    raise RuntimeError("Google CAPTCHA on all retries")
 
         try:
             page.wait_for_selector(sel["container"], timeout=TOPBAR_TIMEOUT)
             container = page.query_selector(sel["container"])
-            iframe_el = container.query_selector("iframe") if container else None
+
+            # Detect if the container itself is the iframe (popup pattern)
+            # vs. a wrapper div that contains an iframe (topbar pattern)
+            iframe_el = None
+            if container:
+                tag = container.evaluate("el => el.tagName").upper()
+                if tag == "IFRAME":
+                    iframe_el = container
+                else:
+                    iframe_el = container.query_selector("iframe")
+
             if iframe_el and ready_selectors:
                 frame = iframe_el.content_frame()
                 if frame:

@@ -1,27 +1,4 @@
-# ── Top Bar – product-specific configuration ─────────────
-
-# ── Platforms (identifier → ECS devEnvDeployer config) ────
-# Each platform maps to a FRONTEND_IDENTIFIER for the ECS build
-PLATFORMS = {
-    "ecko": {
-        "identifier": "eByaziBhc61JYiXhloIfk4EAyFdgT6Na9Dh4sBe3",
-    },
-    "casper": {
-        "identifier": "oKFgZDsC2g3xZTs9cy5m62EekRbfX8h41eawryO0",
-    },
-    "argent": {
-        "identifier": "zGqqd3RCWq9Nyssp2qHXo6LCjeCzwdgxasZO5Vzk",
-    },
-    "fuel": {
-        "identifier": "9FaJTDcBCb48wkWKveRBg61jxfhvtg0V2iazjnA5",
-    },
-    "yoroi":{
-        "identifier": "G1TjqDrfxS8jhRYz15Sg2fMGsvZpdFF8IWgKe0g8",
-    },
-    "gero":{
-        "identifier": "94cnbcoEYv5A6z1yxSizi8RAa7kq71nq6miZeSNh",
-    }
-}
+PLATFORMS = ["ecko"]
 
 # ── Default platform for responsive tests ─────────────────
 DEFAULT_PLATFORM = "ecko"

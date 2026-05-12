@@ -42,27 +42,33 @@ def pixel_diff(screenshot_path, figma_path) -> dict:
         "size": (w, h),
     }
 
-# ── Claude: single-state style comparison (internal) ─────
+# ── GitHub Models: single-state style comparison (internal) ─────
 def _img_to_base64(path) -> str:
     return base64.standard_b64encode(path.read_bytes()).decode("utf-8")
 
+def _img_to_content_block(path) -> dict:
+    """Build an Anthropic image content block from a file path."""
+    b64 = _img_to_base64(path)
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": b64},
+    }
+
 def _compare_single_state(client, figma_elements, state_name, dom_styles,
-                          screenshot_path, spec_path) -> dict:
-    content = []
+                          screenshot_path, spec_path, product_name="topbar") -> dict:
+    messages_content = []
 
     figma_text = json.dumps(figma_elements, indent=2, ensure_ascii=False)
     dom_text = json.dumps({state_name: dom_styles}, indent=2, ensure_ascii=False)
 
     if spec_path and spec_path.exists():
-        content.append({"type": "text", "text": "FIGMA SPEC SHEET (shows all UI states/variants):"})
-        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                        "data": _img_to_base64(spec_path)}})
+        messages_content.append({"type": "text", "text": "FIGMA SPEC SHEET (shows all UI states/variants):"})
+        messages_content.append(_img_to_content_block(spec_path))
 
-    content.append({"type": "text", "text": f"Live screenshot — {screenshot_path.stem}:"})
-    content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                    "data": _img_to_base64(screenshot_path)}})
+    messages_content.append({"type": "text", "text": f"Live screenshot — {screenshot_path.stem}:"})
+    messages_content.append(_img_to_content_block(screenshot_path))
 
-    prompt = f"""Design QA: compare the "{state_name}" state of a browser extension topbar.
+    prompt = f"""Design QA: compare the "{state_name}" state of a browser extension {product_name}.
 You receive a Figma spec image (all states/variants), a live screenshot, Figma JSON data, and DOM CSS data.
 Match each Figma element to its DOM counterpart by name/keyword (e.g. "cashback" in Figma → element containing "cashback" in DOM).
 
@@ -96,28 +102,36 @@ COMPARISON RULES:
 8. IGNORE: dynamic text content differences, Figma annotations/comments, layer ordering.
 
 OUTPUT — valid JSON only, no markdown wrapping:
-{{"checks": [{{"element": "name", "property": "prop", "figma": "val", "dom": "val", "status": "PASS|FAIL", "note": "brief reason", "state": "{state_name}"}}], "visual_issues": ["description of any visual problem not covered by checks"], "summary": {{"total": N, "passed": N, "failed": N, "verdict": "PASS|FAIL"}}}}"""
+{{"checks": [{{"element": "name", "property": "prop", "figma": "val", "dom": "val", "status": "PASS|FAIL", "severity": "high|medium|low", "note": "brief reason", "state": "{state_name}"}}], "visual_issues": [{{"description": "text", "severity": "high|medium|low"}}], "summary": {{"total": N, "passed": N, "failed": N, "high": N, "medium": N, "low": N, "verdict": "PASS|FAIL"}}}}
 
-    content.append({"type": "text", "text": prompt})
+SEVERITY GUIDE:
+- high: missing element, wrong color hue, layout broken, size off >50%
+- medium: spacing off 5–15px, font weight mismatch, border-radius wrong
+- low: size off 10–50%, color shade slightly off, minor font-size diff"""
+
+    messages_content.append({"type": "text", "text": prompt})
 
     for attempt in range(5):
         try:
             response = client.messages.create(
                 model=CLAUDE_MODEL,
                 max_tokens=4096,
-                messages=[{"role": "user", "content": content}],
+                messages=[{"role": "user", "content": messages_content}],
             )
             break
-        except Exception as e:
-            err = str(e).lower()
-            if "429" in str(e) or "rate" in err or "503" in str(e) or "overloaded" in err:
+        except anthropic.RateLimitError:
+            wait = 30 * (attempt + 1)
+            print(f"    Rate limited, waiting {wait}s...")
+            time.sleep(wait)
+        except anthropic.APIStatusError as e:
+            if e.status_code in (429, 503, 529):
                 wait = 30 * (attempt + 1)
                 print(f"    API issue ({str(e)[:80]}...), waiting {wait}s...")
                 time.sleep(wait)
             else:
                 raise
     else:
-        raise RuntimeError(f"Claude API failed after 5 retries (state: {state_name})")
+        raise RuntimeError(f"Anthropic API failed after 5 retries (state: {state_name})")
 
     raw_text = response.content[0].text.strip()
     try:
@@ -136,11 +150,11 @@ OUTPUT — valid JSON only, no markdown wrapping:
                 "summary": {"total": 0, "passed": 0, "failed": 0, "verdict": "FAIL"}}
 
 
-# ── Claude: style comparison (splits per state) ─────────
+# ── GitHub Models: style comparison (splits per state) ───
 RATE_LIMIT_DELAY = 4  # seconds between API calls
 
 def claude_compare_style(figma_elements, dom_elements, screenshots,
-                         spec_path=None, state_name="unknown") -> dict:
+                         spec_path=None, state_name="unknown", product_name="topbar") -> dict:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     # Build state→screenshot mapping
@@ -168,7 +182,8 @@ def claude_compare_style(figma_elements, dom_elements, screenshots,
         print(f"\n    Comparing state '{st_name}' ({i+1}/{len(state_shots)})...")
 
         result = _compare_single_state(
-            client, figma_elements, st_name, dom_styles, shot_path, spec_path
+            client, figma_elements, st_name, dom_styles, shot_path, spec_path,
+            product_name=product_name
         )
 
         checks = result.get("checks", [])
@@ -180,7 +195,8 @@ def claude_compare_style(figma_elements, dom_elements, screenshots,
         print(f"      {st_name}: {len(checks)} checks, {passed} pass, {failed} fail")
         for c in checks:
             if c.get("status") == "FAIL":
-                print(f"        x {c.get('element')} > {c.get('property')}: "
+                sev = c.get('severity', '?')
+                print(f"        x [{sev}] {c.get('element')} > {c.get('property')}: "
                       f"expected {c.get('figma')}, got {c.get('dom')}")
 
         all_checks.extend(checks)
@@ -196,26 +212,34 @@ def claude_compare_style(figma_elements, dom_elements, screenshots,
     # Merged result
     verdict = "PASS" if total_fail == 0 else "FAIL"
     total = total_pass + total_fail
+
+    sev_high = sum(1 for c in all_checks if c.get("status") == "FAIL" and c.get("severity") == "high")
+    sev_med = sum(1 for c in all_checks if c.get("status") == "FAIL" and c.get("severity") == "medium")
+    sev_low = sum(1 for c in all_checks if c.get("status") == "FAIL" and c.get("severity") == "low")
+
     merged = {
         "checks": all_checks,
         "visual_issues": all_issues,
-        "summary": {"total": total, "passed": total_pass, "failed": total_fail, "verdict": verdict},
+        "summary": {
+            "total": total, "passed": total_pass, "failed": total_fail,
+            "high": sev_high, "medium": sev_med, "low": sev_low,
+            "verdict": verdict,
+        },
     }
 
     print(f"\n=== Style summary ({len(state_shots)} states) ===")
-    print(f"  Total: {total} | Pass: {total_pass} | Fail: {total_fail} | {verdict}")
+    print(f"  Total: {total} | Pass: {total_pass} | Fail: {total_fail} "
+          f"(high: {sev_high}, medium: {sev_med}, low: {sev_low}) | {verdict}")
 
     return merged
 
-# ── Claude: responsive visual comparison ─────────────────
-def claude_compare(screenshot_path, figma_path, diff_stats=None) -> str:
+# ── GitHub Models: responsive visual comparison ──────────
+def claude_compare(screenshot_path, figma_path, diff_stats=None, product_name="topbar") -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     content = [
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-         "data": _img_to_base64(screenshot_path)}},
-        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-         "data": _img_to_base64(figma_path)}},
+        _img_to_content_block(screenshot_path),
+        _img_to_content_block(figma_path),
     ]
 
     diff_info = ""
@@ -223,7 +247,7 @@ def claude_compare(screenshot_path, figma_path, diff_stats=None) -> str:
         diff_info = f"""\n\nPixel diff results: {diff_stats['mismatch']:,} pixels differ out of {diff_stats['total']:,} ({diff_stats['pct']}%).
     Images were compared at {diff_stats['size'][0]}x{diff_stats['size'][1]}."""
 
-    prompt = f"""Visual QA: Compare a browser extension topbar across two images.
+    prompt = f"""Visual QA: Compare a browser extension {product_name} across two images.
 Image 1 = live browser screenshot. Image 2 = Figma design reference.
 {diff_info}
 
@@ -235,7 +259,7 @@ COMPARISON CATEGORIES (check each):
 5. COLORS — Are background colors, text colors, border colors matching? (tolerance: ΔE ≤ 5)
 6. TYPOGRAPHY — Similar font sizes and weights? (tolerance: ±1px size, visual weight match)
 7. STRUCTURE — Same number of visible sections/groups? Any missing or extra components?
-8. CONTAINER HEIGHT — Is the overall topbar height similar?
+8. CONTAINER HEIGHT — Is the overall {product_name} height similar?
 
 IGNORE (always PASS these):
 - Different text content, logos, or icons (these are dynamic/per-retailer)
@@ -251,14 +275,18 @@ FAIL ONLY WHEN:
 - Layout is structurally broken (overlapping, overflow, wrong axis)
 - Spacing off by more than 15px
 
+For each category, also assign a SEVERITY (high, medium, low):
+- high: missing element, completely wrong color, layout broken, size off >50%
+- medium: spacing off 5–15px, font weight mismatch, border-radius wrong
+- low: minor size diff 10–50%, slight color shade, minor font-size diff
+
 FORMAT each category as:
-"N. Category: PASS/FAIL — [brief observation]"
+"N. Category: PASS/FAIL (severity) — [brief observation]"
 
 End with exactly: OVERALL: PASS or OVERALL: FAIL"""
 
     if diff_stats and diff_stats.get("diff_path"):
-        content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                        "data": _img_to_base64(diff_stats["diff_path"])}})
+        content.append(_img_to_content_block(diff_stats["diff_path"]))
         content.append({"type": "text", "text": "Image 3 above is the pixel-diff heatmap (red = different pixels).\n\n" + prompt})
     else:
         content.append({"type": "text", "text": prompt})
@@ -271,18 +299,21 @@ End with exactly: OVERALL: PASS or OVERALL: FAIL"""
                 messages=[{"role": "user", "content": content}],
             )
             break
-        except Exception as e:
-            err = str(e).lower()
-            if "429" in str(e) or "rate" in err or "503" in str(e) or "overloaded" in err:
+        except anthropic.RateLimitError:
+            wait = 30 * (attempt + 1)
+            print(f"  Rate limited, waiting {wait}s...")
+            time.sleep(wait)
+        except anthropic.APIStatusError as e:
+            if e.status_code in (429, 503, 529):
                 wait = 30 * (attempt + 1)
                 print(f"  API issue ({str(e)[:80]}...), waiting {wait}s...")
                 time.sleep(wait)
             else:
                 raise
     else:
-        raise RuntimeError("Claude API failed after 5 retries")
+        raise RuntimeError("Anthropic API failed after 5 retries")
 
     result = response.content[0].text
-    print(f"\n=== Claude: {screenshot_path.name} vs {figma_path.name} ===")
+    print(f"\n=== AI Compare: {screenshot_path.name} vs {figma_path.name} ===")
     print(result)
     return result
