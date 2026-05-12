@@ -54,8 +54,13 @@ def resolve_extension(product: str, platform: str, platform_cfg: dict,
     if not force_build:
         print(f"  Downloading extension for platform '{platform}' from S3...")
         try:
-            return download_latest_extension(product, platform)
+            return download_latest_extension(platform)
         except FileNotFoundError:
+            if not branch and not frontend_branch:
+                raise RuntimeError(
+                    f"No extension in S3 for '{platform}' and no branch specified. "
+                    f"Use --branch/--frontend-branch to build, or --no-build to require S3 only."
+                )
             print(f"  No extension in S3 for '{platform}', building via ECS...")
 
     # Build via ECS (force_build or S3 not found)

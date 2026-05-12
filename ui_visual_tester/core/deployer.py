@@ -132,7 +132,7 @@ def download_extension(env_name: str, platform_name: str) -> Path:
     raise FileNotFoundError(f"No manifest.json found in {extract_dir}")
 
 # ── S3: Download latest extension (any env) ──────────────
-def download_latest_extension(product: str, platform_name: str) -> Path:
+def download_latest_extension(platform_name: str) -> Path:
     """Find the most recently uploaded extension zip in S3 for this platform."""
     s3 = boto3.client("s3", region_name=AWS_REGION)
     prefix = f"extensions/"
