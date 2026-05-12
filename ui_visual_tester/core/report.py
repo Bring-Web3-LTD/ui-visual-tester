@@ -20,10 +20,11 @@ def generate_report(results: list):
         platform_name = raw_name.split("_", 1)[1] if "_" in raw_name else raw_name
 
         if r.get("mode") == "responsive" and isinstance(cr, str):
-            # Responsive: parse plain-text Gemini response
+            # Responsive: parse plain-text AI response
             lines = cr.strip().splitlines()
             pass_items = []
             fail_items = []
+            severity_counts = {"high": 0, "medium": 0, "low": 0}
             for line in lines:
                 stripped = line.strip()
                 if not stripped or stripped.upper().startswith("OVERALL"):
@@ -31,7 +32,16 @@ def generate_report(results: list):
                 if ": PASS" in stripped:
                     pass_items.append(stripped)
                 elif ": FAIL" in stripped:
-                    fail_items.append(stripped)
+                    sev = "medium"  # default
+                    low_line = stripped.lower()
+                    if "(high)" in low_line:
+                        sev = "high"
+                    elif "(low)" in low_line:
+                        sev = "low"
+                    elif "(medium)" in low_line:
+                        sev = "medium"
+                    severity_counts[sev] += 1
+                    fail_items.append({"issue": stripped, "severity": sev})
 
             overall_match = re.search(r"OVERALL:\s*(PASS|FAIL)", cr, re.IGNORECASE)
             verdict = overall_match.group(1).upper() if overall_match else "FAIL"
@@ -42,6 +52,7 @@ def generate_report(results: list):
                 "total_checks": total,
                 "passed": len(pass_items),
                 "failed": len(fail_items),
+                "severity": severity_counts,
                 "PASS": pass_items,
                 "FAIL": fail_items,
             }
@@ -66,13 +77,17 @@ def generate_report(results: list):
                 pass_list.append(f"[{c.get('state', '?')}] {c.get('element', '')} > {c.get('property', '')}: {c.get('dom', '')}")
 
             fail_list = []
+            severity_counts = {"high": 0, "medium": 0, "low": 0}
             for c in failed_checks:
+                sev = c.get("severity", "medium")
+                severity_counts[sev] = severity_counts.get(sev, 0) + 1
                 fail_list.append({
                     "state": c.get("state", "?"),
                     "element": c.get("element", ""),
                     "property": c.get("property", ""),
                     "expected (figma)": c.get("figma", ""),
                     "actual (dom)": c.get("dom", ""),
+                    "severity": sev,
                 })
 
             platform_entry = {
@@ -80,6 +95,7 @@ def generate_report(results: list):
                 "total_checks": summary.get("total", len(checks)),
                 "passed": summary.get("passed", len(passed_checks)),
                 "failed": summary.get("failed", len(failed_checks)),
+                "severity": severity_counts,
                 "PASS": pass_list,
                 "FAIL": fail_list,
             }

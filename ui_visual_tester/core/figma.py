@@ -2,6 +2,7 @@ import json
 import re
 import time
 import requests
+from pathlib import Path
 from config import FIGMA_FILES, FIGMA_FRAMES_DIR, FIGMA_TOKEN
 
 
@@ -214,11 +215,13 @@ def deduplicate_figma_elements(elements, prod_cfg=None):
     return unique
 
 # ── Download Figma frames ────────────────────────────────
-def download_figma_frames(product: str):
+def download_figma_frames(product: str, skip_images: bool = False, out_dir: Path = None):
     file_key = FIGMA_FILES.get(product)
     if not file_key:
         print(f"ERROR: No Figma file key for product '{product}'")
-        return []
+        return [], {}
+
+    target_dir = out_dir or FIGMA_FRAMES_DIR
 
     headers = {"X-Figma-Token": FIGMA_TOKEN}
     url = f"https://api.figma.com/v1/files/{file_key}"
@@ -242,16 +245,23 @@ def download_figma_frames(product: str):
     if not frames:
         return [], {}
 
+    # If images are cached, return existing files + nodes (skip download)
+    if skip_images:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        saved = list(target_dir.glob("*.png"))
+        print(f"  Using {len(saved)} cached PNGs (skipped image download)")
+        return saved, frame_nodes
+
     ids_param = ",".join(frames.keys())
     img_url = f"https://api.figma.com/v1/images/{file_key}?ids={ids_param}&format=png&scale=1"
     img_resp = figma_request(img_url, headers)
     images = img_resp.json().get("images", {})
 
-    FIGMA_FRAMES_DIR.mkdir(exist_ok=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
     saved = []
     for node_id, image_url in images.items():
         frame_name = frames[node_id]
-        file_path = FIGMA_FRAMES_DIR / f"{frame_name}.png"
+        file_path = target_dir / f"{frame_name}.png"
         img_data = requests.get(image_url).content
         file_path.write_bytes(img_data)
         print(f"  Saved: {file_path.name}")
@@ -261,6 +271,17 @@ def download_figma_frames(product: str):
 
 # ── Parse Figma frame names ──────────────────────────────
 def parse_figma_frames(product: str, frame_names: list[str]):
+    """Parse Figma frame names into responsive and style lists.
+
+    Naming conventions:
+        Responsive:  product_1920_state name   → (name, viewport, state)
+        Style (all): product_Platform           → (name, platform, None)   # run ALL states
+        Style (one): product_Platform_state     → (name, platform, state)  # run ONE state
+
+    Platform names use hyphens for variants (e.g. Casper-light).
+    State names may contain spaces; underscores in remaining parts are
+    converted to spaces so they match STATES dict keys.
+    """
     responsive = []
     styles = []
 
@@ -270,11 +291,18 @@ def parse_figma_frames(product: str, frame_names: list[str]):
             continue
         second = parts[1]
         if second.isdigit():
+            # Responsive: product_1920_state name
             viewport = second
-            state = "_".join(parts[2:]) if len(parts) > 2 else "default"
+            state = " ".join(parts[2:]) if len(parts) > 2 else "default"
             responsive.append((name, int(viewport), state))
+        elif len(parts) == 2:
+            # Style without state: product_Platform → run all states
+            platform = parts[1].lower()
+            styles.append((name, platform, None))
         else:
-            platform = "_".join(parts[1:]).lower()
-            styles.append((name, platform))
+            # Style with state: product_Platform_state name parts
+            platform = parts[1].lower()
+            state = " ".join(parts[2:])
+            styles.append((name, platform, state))
 
     return responsive, styles

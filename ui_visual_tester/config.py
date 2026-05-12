@@ -9,10 +9,13 @@ load_dotenv(_config_dir / ".env", encoding="utf-8-sig")
 # ── API Keys ──────────────────────────────────────────────
 FIGMA_TOKEN       = os.getenv("FIGMA_TOKEN", "")
 FIGMA_FILES = {
-    "topbar": os.getenv("FIGMA_FILE_KEY_TOPBAR", ""),
+    "topbar":    os.getenv("FIGMA_FILE_KEY_TOPBAR", ""),
+    "popup":     os.getenv("FIGMA_FILE_KEY_POPUP", ""),
+    "offerbar":  os.getenv("FIGMA_FILE_KEY_OFFERBAR", ""),
 }
 GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+GITHUB_TOKEN      = os.getenv("GITHUB_TOKEN", "")
 
 # ── Paths ─────────────────────────────────────────────────
 PROJECT_DIR      = Path(__file__).parent
@@ -52,6 +55,8 @@ WAIT_AFTER_SEARCH    = 4000
 TOPBAR_TIMEOUT       = 30000
 WAIT_TOPBAR_RENDER   = 3000
 
+# ── AI gating ─────────────────────────────────────────────
+PIXEL_DIFF_THRESHOLD = 2.0   # skip AI when pixel diff < this %
+
 # ── AI Vision model ───────────────────────────────────────
-GEMINI_MODEL = "gemini-2.5-flash"
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
